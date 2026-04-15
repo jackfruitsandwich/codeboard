@@ -2,7 +2,7 @@
 
 A canvas of ghostly terminals (and browser windows).
 
-https://github.com/user-attachments/assets/18411f2e-e32b-4c00-bfcf-3287fe6195ad
+![demo](demo.gif)
 
 ## Shortcuts
 
