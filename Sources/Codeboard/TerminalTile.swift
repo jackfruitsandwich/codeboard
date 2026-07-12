@@ -151,7 +151,7 @@ final class CanvasTileContainerView: FlippedView {
     var onSelect: (() -> Void)?
     var onResize: ((TileResizeEdges, CGPoint, Bool) -> Void)?
 
-    private let contentInset: CGFloat = 1
+    private let contentInset: CGFloat = 0
     private let cornerRadius: CGFloat = 10
 
     init(title: String, contentView: NSView) {
