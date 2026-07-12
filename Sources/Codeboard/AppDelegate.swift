@@ -142,11 +142,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let initialContentSize = CanvasViewController.initialContentSize
         let window = CanvasWindow(
             contentRect: NSRect(origin: .zero, size: initialContentSize),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         window.title = "codeboard"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        // The canvas, tiles, and terminal themes are all dark glass; the
+        // behind-window material must not flip bright in system light mode.
+        window.appearance = NSAppearance(named: .darkAqua)
         window.contentViewController = canvasController
         window.setContentSize(initialContentSize)
         window.center()

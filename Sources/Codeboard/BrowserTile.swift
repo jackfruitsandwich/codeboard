@@ -293,16 +293,15 @@ final class BrowserTileContentView: FlippedView, NSTextFieldDelegate {
     var onInteraction: (() -> Void)?
 
     private let toolbarView = NSView(frame: .zero)
-    private let backButton = NSButton(title: "<", target: nil, action: nil)
-    private let forwardButton = NSButton(title: ">", target: nil, action: nil)
-    private let reloadButton = NSButton(title: "Reload", target: nil, action: nil)
-    private let openExternalButton = NSButton(title: "Open", target: nil, action: nil)
+    private let backButton = NSButton(title: "", target: nil, action: nil)
+    private let forwardButton = NSButton(title: "", target: nil, action: nil)
+    private let reloadButton = NSButton(title: "", target: nil, action: nil)
+    private let openExternalButton = NSButton(title: "", target: nil, action: nil)
     private let webView: BrowserWebView
 
-    private let toolbarHeight: CGFloat = 40
-    private let contentInset: CGFloat = 8
-    private let compactButtonWidth: CGFloat = 30
-    private let actionButtonWidth: CGFloat = 62
+    private let toolbarHeight: CGFloat = 30
+    private let contentInset: CGFloat = 6
+    private let compactButtonWidth: CGFloat = 24
 
     init(webView: BrowserWebView) {
         self.webView = webView
@@ -319,30 +318,31 @@ final class BrowserTileContentView: FlippedView, NSTextFieldDelegate {
 
         toolbarView.frame = CGRect(x: 0, y: 0, width: bounds.width, height: toolbarHeight)
 
-        let buttonY: CGFloat = 7
-        backButton.frame = CGRect(x: contentInset, y: buttonY, width: compactButtonWidth, height: toolbarHeight - 14)
+        let buttonSize: CGFloat = toolbarHeight - 8
+        let buttonY: CGFloat = 4
+        backButton.frame = CGRect(x: contentInset, y: buttonY, width: compactButtonWidth, height: buttonSize)
         forwardButton.frame = CGRect(
-            x: backButton.frame.maxX + 6,
+            x: backButton.frame.maxX + 2,
             y: buttonY,
             width: compactButtonWidth,
-            height: toolbarHeight - 14
+            height: buttonSize
         )
         reloadButton.frame = CGRect(
-            x: forwardButton.frame.maxX + 8,
+            x: forwardButton.frame.maxX + 2,
             y: buttonY,
-            width: actionButtonWidth,
-            height: toolbarHeight - 14
+            width: compactButtonWidth,
+            height: buttonSize
         )
         openExternalButton.frame = CGRect(
-            x: bounds.width - contentInset - actionButtonWidth,
+            x: bounds.width - contentInset - compactButtonWidth,
             y: buttonY,
-            width: actionButtonWidth,
-            height: toolbarHeight - 14
+            width: compactButtonWidth,
+            height: buttonSize
         )
 
         let urlFieldX = reloadButton.frame.maxX + 8
-        let urlFieldWidth = max(140, openExternalButton.frame.minX - 8 - urlFieldX)
-        urlField.frame = CGRect(x: urlFieldX, y: 8, width: urlFieldWidth, height: toolbarHeight - 16)
+        let urlFieldWidth = max(120, openExternalButton.frame.minX - 8 - urlFieldX)
+        urlField.frame = CGRect(x: urlFieldX, y: 5, width: urlFieldWidth, height: toolbarHeight - 10)
 
         webView.frame = CGRect(
             x: 0,
@@ -381,18 +381,18 @@ final class BrowserTileContentView: FlippedView, NSTextFieldDelegate {
 
     private func setup() {
         wantsLayer = true
-        layer?.backgroundColor = NSColor(calibratedWhite: 0.08, alpha: 1).cgColor
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.35).cgColor
 
         toolbarView.wantsLayer = true
         toolbarView.layer?.backgroundColor = NSColor(calibratedWhite: 1, alpha: 0.04).cgColor
         addSubview(toolbarView)
 
-        configureButton(backButton, action: #selector(handleBack(_:)))
-        configureButton(forwardButton, action: #selector(handleForward(_:)))
-        configureButton(reloadButton, action: #selector(handleReload(_:)))
-        configureButton(openExternalButton, action: #selector(handleOpenExternal(_:)))
+        configureButton(backButton, symbol: "chevron.left", action: #selector(handleBack(_:)))
+        configureButton(forwardButton, symbol: "chevron.right", action: #selector(handleForward(_:)))
+        configureButton(reloadButton, symbol: "arrow.clockwise", action: #selector(handleReload(_:)))
+        configureButton(openExternalButton, symbol: "arrow.up.forward.square", action: #selector(handleOpenExternal(_:)))
 
-        urlField.font = .systemFont(ofSize: 13, weight: .regular)
+        urlField.font = .systemFont(ofSize: 12, weight: .regular)
         urlField.isBordered = true
         urlField.bezelStyle = .roundedBezel
         urlField.focusRingType = .default
@@ -405,8 +405,13 @@ final class BrowserTileContentView: FlippedView, NSTextFieldDelegate {
         addSubview(webView)
     }
 
-    private func configureButton(_ button: NSButton, action: Selector) {
-        button.bezelStyle = .texturedRounded
+    private func configureButton(_ button: NSButton, symbol: String, action: Selector) {
+        button.image = NSImage(
+            systemSymbolName: symbol,
+            accessibilityDescription: nil
+        )?.withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
+        button.isBordered = false
+        button.contentTintColor = NSColor(calibratedWhite: 1, alpha: 0.65)
         button.target = self
         button.action = action
         toolbarView.addSubview(button)

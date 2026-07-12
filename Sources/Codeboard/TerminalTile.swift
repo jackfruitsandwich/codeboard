@@ -136,22 +136,24 @@ final class TerminalTile: CanvasTile {
 
 @MainActor
 final class CanvasTileContainerView: FlippedView {
-    private static let unfocusedBorderColor = NSColor(calibratedWhite: 1, alpha: 0.12).cgColor
-    private static let focusedBorderColor = NSColor.systemBlue.cgColor
-    private static let focusedShadowColor = NSColor.systemBlue.withAlphaComponent(0.6).cgColor
-    private static let titleBarBackgroundColor = NSColor(calibratedWhite: 1, alpha: 0.05).cgColor
+    private static let unfocusedBorderColor = NSColor(calibratedWhite: 1, alpha: 0.10).cgColor
+    private static let focusedBorderColor = NSColor(calibratedWhite: 1, alpha: 0.5).cgColor
+    private static let focusedGlowColor = NSColor(calibratedWhite: 1, alpha: 0.9).cgColor
+    private static let cardBackgroundColor = NSColor.black.withAlphaComponent(0.12).cgColor
 
-    private let titleBarView = NSView(frame: .zero)
+    private let cardView = FlippedView(frame: .zero)
+    private let titlePillView = NSView(frame: .zero)
     private let titleLabel: NSTextField
     private let contentView: NSView
     private let resizeOverlayView = TileResizeOverlayView(frame: .zero)
     private let rootLayer = CALayer()
+    private var hoverTrackingArea: NSTrackingArea?
 
     var onSelect: (() -> Void)?
     var onResize: ((TileResizeEdges, CGPoint, Bool) -> Void)?
 
-    private let titleBarHeight: CGFloat = 26
-    private let contentInset: CGFloat = 8
+    private let contentInset: CGFloat = 1
+    private let cornerRadius: CGFloat = 10
 
     init(title: String, contentView: NSView) {
         self.titleLabel = NSTextField(labelWithString: title)
@@ -171,32 +173,22 @@ final class CanvasTileContainerView: FlippedView {
     override func layout() {
         super.layout()
 
-        titleBarView.frame = CGRect(x: 0, y: 0, width: bounds.width, height: titleBarHeight)
-        titleLabel.frame = CGRect(
-            x: 10,
-            y: 4,
-            width: max(0, bounds.width - 20),
-            height: titleBarHeight - 8
-        )
-
-        contentView.frame = CGRect(
-            x: contentInset,
-            y: titleBarHeight + contentInset,
-            width: max(0, bounds.width - contentInset * 2),
-            height: max(0, bounds.height - titleBarHeight - contentInset * 2)
-        )
+        cardView.frame = bounds
+        contentView.frame = bounds.insetBy(dx: contentInset, dy: contentInset)
+        layoutTitlePill()
         resizeOverlayView.frame = bounds
     }
 
     func setTitle(_ title: String) {
         titleLabel.stringValue = title
+        layoutTitlePill()
     }
 
     func setFocused(_ focused: Bool) {
-        rootLayer.borderColor = focused ? Self.focusedBorderColor : Self.unfocusedBorderColor
-        rootLayer.shadowColor = focused ? Self.focusedShadowColor : nil
-        rootLayer.shadowRadius = focused ? 12 : 0
-        rootLayer.shadowOpacity = focused ? 0.35 : 0
+        cardView.layer?.borderColor = focused ? Self.focusedBorderColor : Self.unfocusedBorderColor
+        rootLayer.shadowColor = focused ? Self.focusedGlowColor : nil
+        rootLayer.shadowRadius = focused ? 14 : 0
+        rootLayer.shadowOpacity = focused ? 0.3 : 0
         rootLayer.shadowOffset = .zero
     }
 
@@ -205,26 +197,86 @@ final class CanvasTileContainerView: FlippedView {
         super.mouseDown(with: event)
     }
 
+    override func updateTrackingAreas() {
+        if let hoverTrackingArea {
+            removeTrackingArea(hoverTrackingArea)
+        }
+        let trackingArea = NSTrackingArea(
+            rect: .zero,
+            options: [.activeInActiveApp, .inVisibleRect, .mouseEnteredAndExited],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(trackingArea)
+        hoverTrackingArea = trackingArea
+        super.updateTrackingAreas()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        setTitlePillVisible(true)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        setTitlePillVisible(false)
+    }
+
+    private func setTitlePillVisible(_ visible: Bool) {
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.18
+            titlePillView.animator().alphaValue = visible ? 1 : 0
+        }
+    }
+
+    private func layoutTitlePill() {
+        titleLabel.sizeToFit()
+        let labelSize = titleLabel.frame.size
+        titlePillView.frame = CGRect(
+            x: 8,
+            y: 8,
+            width: min(labelSize.width + 16, max(0, bounds.width - 16)),
+            height: labelSize.height + 8
+        )
+        titleLabel.frame = CGRect(
+            x: 8,
+            y: 4,
+            width: max(0, titlePillView.frame.width - 16),
+            height: labelSize.height
+        )
+    }
+
     private func setup() {
         wantsLayer = true
-        rootLayer.cornerRadius = 12
-        rootLayer.borderWidth = 2
-        rootLayer.borderColor = Self.unfocusedBorderColor
         rootLayer.backgroundColor = NSColor.clear.cgColor
 
-        titleBarView.wantsLayer = true
-        titleBarView.layer?.backgroundColor = Self.titleBarBackgroundColor
-        addSubview(titleBarView)
+        cardView.wantsLayer = true
+        if let cardLayer = cardView.layer {
+            cardLayer.cornerRadius = cornerRadius
+            cardLayer.masksToBounds = true
+            cardLayer.borderWidth = 1
+            cardLayer.borderColor = Self.unfocusedBorderColor
+            cardLayer.backgroundColor = Self.cardBackgroundColor
+        }
+        addSubview(cardView)
 
-        titleLabel.font = .systemFont(ofSize: 12, weight: .medium)
-        titleLabel.textColor = NSColor(calibratedWhite: 1, alpha: 0.88)
-        addSubview(titleLabel)
+        cardView.addSubview(contentView)
 
-        addSubview(contentView)
+        titlePillView.wantsLayer = true
+        titlePillView.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.6).cgColor
+        titlePillView.layer?.cornerRadius = 7
+        titlePillView.alphaValue = 0
+
+        titleLabel.font = .systemFont(ofSize: 10, weight: .medium)
+        titleLabel.textColor = NSColor(calibratedWhite: 1, alpha: 0.8)
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titlePillView.addSubview(titleLabel)
+        cardView.addSubview(titlePillView)
+
         resizeOverlayView.onResize = { [weak self] edges, delta, ended in
             self?.onResize?(edges, delta, ended)
         }
         addSubview(resizeOverlayView)
+
+        updateTrackingAreas()
     }
 }
 

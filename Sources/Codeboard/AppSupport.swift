@@ -53,32 +53,40 @@ final class CanvasDocumentView: FlippedView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
 
-        NSColor(calibratedWhite: 0.10, alpha: 1).setFill()
+        // Translucent tint over the behind-window blur; tiles supply their own
+        // darker glass so the canvas floor must stay lighter than tile interiors.
+        NSColor.black.withAlphaComponent(0.34).setFill()
         dirtyRect.fill()
 
         guard cellSize.width > 0, cellSize.height > 0 else { return }
 
-        NSColor(calibratedWhite: 1, alpha: 0.05).setStroke()
-        let path = NSBezierPath()
-        path.lineWidth = 1
+        let subdivisions: CGFloat = 8
+        let stepX = cellSize.width / subdivisions
+        let stepY = cellSize.height / subdivisions
+        guard stepX > 4, stepY > 4 else { return }
 
-        let startColumn = Int(floor(dirtyRect.minX / cellSize.width))
-        let endColumn = Int(ceil(dirtyRect.maxX / cellSize.width))
+        let dotColor = NSColor(calibratedWhite: 1, alpha: 0.06)
+        let anchorColor = NSColor(calibratedWhite: 1, alpha: 0.14)
+
+        let startColumn = Int(floor(dirtyRect.minX / stepX))
+        let endColumn = Int(ceil(dirtyRect.maxX / stepX))
+        let startRow = Int(floor(dirtyRect.minY / stepY))
+        let endRow = Int(ceil(dirtyRect.maxY / stepY))
+
         for column in startColumn...endColumn {
-            let x = CGFloat(column) * cellSize.width
-            path.move(to: NSPoint(x: x, y: dirtyRect.minY))
-            path.line(to: NSPoint(x: x, y: dirtyRect.maxY))
+            for row in startRow...endRow {
+                let isAnchor = column % Int(subdivisions) == 0 && row % Int(subdivisions) == 0
+                let radius: CGFloat = isAnchor ? 1.5 : 1
+                (isAnchor ? anchorColor : dotColor).setFill()
+                let dotRect = NSRect(
+                    x: CGFloat(column) * stepX - radius,
+                    y: CGFloat(row) * stepY - radius,
+                    width: radius * 2,
+                    height: radius * 2
+                )
+                NSBezierPath(ovalIn: dotRect).fill()
+            }
         }
-
-        let startRow = Int(floor(dirtyRect.minY / cellSize.height))
-        let endRow = Int(ceil(dirtyRect.maxY / cellSize.height))
-        for row in startRow...endRow {
-            let y = CGFloat(row) * cellSize.height
-            path.move(to: NSPoint(x: dirtyRect.minX, y: y))
-            path.line(to: NSPoint(x: dirtyRect.maxX, y: y))
-        }
-
-        path.stroke()
     }
 
     override func mouseDown(with event: NSEvent) {

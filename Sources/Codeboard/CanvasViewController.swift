@@ -200,6 +200,7 @@ final class CanvasWindow: NSWindow {
 final class CanvasViewController: NSViewController, CanvasCommandHandling {
     static let initialContentSize = NSSize(width: 1480, height: 920)
 
+    private let backdropView = NSVisualEffectView(frame: .zero)
     private let scrollView = NSScrollView(frame: .zero)
     private let documentView = CanvasDocumentView(frame: .zero)
     private let model = CanvasModel()
@@ -207,7 +208,7 @@ final class CanvasViewController: NSViewController, CanvasCommandHandling {
     private var tiles: [UUID: CanvasTile] = [:]
     private let baseTileSize = CGSize(width: 920, height: 620)
     private var zoomScale: CGFloat = 1.0
-    private let minZoomScale: CGFloat = 0.55
+    private let minZoomScale: CGFloat = 0.4
     private let maxZoomScale: CGFloat = 1.8
     private var gridHalfSpan = 64
     private let canvasInset: CGFloat = 60
@@ -221,13 +222,17 @@ final class CanvasViewController: NSViewController, CanvasCommandHandling {
     }
 
     private var tileGap: CGFloat {
-        max(12, 20 * zoomScale)
+        max(6, 10 * zoomScale)
     }
 
     override func loadView() {
         view = FlippedView(frame: NSRect(origin: .zero, size: Self.initialContentSize))
         view.wantsLayer = true
-        view.layer?.backgroundColor = NSColor(calibratedWhite: 0.08, alpha: 1).cgColor
+
+        backdropView.material = .hudWindow
+        backdropView.blendingMode = .behindWindow
+        backdropView.state = .active
+        view.addSubview(backdropView)
 
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
@@ -255,6 +260,7 @@ final class CanvasViewController: NSViewController, CanvasCommandHandling {
 
     override func viewDidLayout() {
         super.viewDidLayout()
+        backdropView.frame = view.bounds
         scrollView.frame = view.bounds
         if !didCenterInitialViewport {
             didCenterInitialViewport = true
