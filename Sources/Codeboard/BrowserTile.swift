@@ -381,7 +381,7 @@ final class BrowserTileContentView: FlippedView, NSTextFieldDelegate {
 
     private func setup() {
         wantsLayer = true
-        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.35).cgColor
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.5).cgColor
 
         toolbarView.wantsLayer = true
         toolbarView.layer?.backgroundColor = NSColor(calibratedWhite: 1, alpha: 0.04).cgColor

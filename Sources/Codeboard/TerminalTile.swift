@@ -136,10 +136,8 @@ final class TerminalTile: CanvasTile {
 
 @MainActor
 final class CanvasTileContainerView: FlippedView {
-    private static let unfocusedBorderColor = NSColor(calibratedWhite: 1, alpha: 0.10).cgColor
-    private static let focusedBorderColor = NSColor(calibratedWhite: 1, alpha: 0.5).cgColor
     private static let focusedGlowColor = NSColor(calibratedWhite: 1, alpha: 0.9).cgColor
-    private static let cardBackgroundColor = NSColor.black.withAlphaComponent(0.12).cgColor
+    private static let cardBackgroundColor = NSColor.black.withAlphaComponent(0.5).cgColor
 
     private let cardView = FlippedView(frame: .zero)
     private let titlePillView = NSView(frame: .zero)
@@ -186,10 +184,9 @@ final class CanvasTileContainerView: FlippedView {
     }
 
     func setFocused(_ focused: Bool) {
-        cardView.layer?.borderColor = focused ? Self.focusedBorderColor : Self.unfocusedBorderColor
         rootLayer.shadowColor = focused ? Self.focusedGlowColor : nil
-        rootLayer.shadowRadius = focused ? 14 : 0
-        rootLayer.shadowOpacity = focused ? 0.3 : 0
+        rootLayer.shadowRadius = focused ? 16 : 0
+        rootLayer.shadowOpacity = focused ? 0.34 : 0
         rootLayer.shadowOffset = .zero
     }
 
@@ -268,8 +265,6 @@ final class CanvasTileContainerView: FlippedView {
         if let cardLayer = cardView.layer {
             cardLayer.cornerRadius = cornerRadius
             cardLayer.masksToBounds = true
-            cardLayer.borderWidth = 1
-            cardLayer.borderColor = Self.unfocusedBorderColor
             cardLayer.backgroundColor = Self.cardBackgroundColor
         }
         addSubview(cardView)
