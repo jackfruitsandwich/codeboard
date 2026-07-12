@@ -2,20 +2,6 @@ import AppKit
 import Foundation
 import GhosttyKit
 
-private enum FocusViewportMode: Int {
-    case centerOnFocus
-    case revealFocusedTile
-
-    var controlLabel: String {
-        switch self {
-        case .centerOnFocus:
-            return "Focus Mode: Center"
-        case .revealFocusedTile:
-            return "Focus Mode: Reveal"
-        }
-    }
-}
-
 private enum FocusViewportBehavior {
     case center
     case revealIfNeeded
@@ -217,8 +203,6 @@ final class CanvasViewController: NSViewController, CanvasCommandHandling {
     private let scrollView = NSScrollView(frame: .zero)
     private let documentView = CanvasDocumentView(frame: .zero)
     private let model = CanvasModel()
-    private let focusModeOverlay = NSView(frame: .zero)
-    private let focusModeButton = NSButton(title: "", target: nil, action: nil)
 
     private var tiles: [UUID: CanvasTile] = [:]
     private let baseTileSize = CGSize(width: 920, height: 620)
@@ -227,14 +211,6 @@ final class CanvasViewController: NSViewController, CanvasCommandHandling {
     private let maxZoomScale: CGFloat = 1.8
     private var gridHalfSpan = 64
     private let canvasInset: CGFloat = 60
-    private let focusModeOverlayInset = CGPoint(x: 14, y: 14)
-    private let focusModeOverlayHeight: CGFloat = 34
-    private let focusModeOverlayWidth: CGFloat = 154
-    private var focusViewportMode: FocusViewportMode = .centerOnFocus {
-        didSet {
-            updateFocusModeButtonTitle()
-        }
-    }
 
     private var didCenterInitialViewport = false
     private var isApplyingFocus = false
@@ -275,20 +251,11 @@ final class CanvasViewController: NSViewController, CanvasCommandHandling {
         updateDocumentMetrics()
         scrollView.documentView = documentView
         view.addSubview(scrollView)
-        configureFocusModeOverlay()
-        view.addSubview(focusModeOverlay, positioned: .above, relativeTo: scrollView)
     }
 
     override func viewDidLayout() {
         super.viewDidLayout()
         scrollView.frame = view.bounds
-        focusModeOverlay.frame = CGRect(
-            x: focusModeOverlayInset.x,
-            y: focusModeOverlayInset.y,
-            width: focusModeOverlayWidth,
-            height: focusModeOverlayHeight
-        )
-        focusModeButton.frame = focusModeOverlay.bounds.insetBy(dx: 4, dy: 4)
         if !didCenterInitialViewport {
             didCenterInitialViewport = true
             centerOnGridPoint(.origin)
@@ -510,7 +477,7 @@ final class CanvasViewController: NSViewController, CanvasCommandHandling {
             centerOnGridPoint(.origin)
             return
         }
-        applyViewportBehavior(currentFocusViewportBehavior(), to: focusedTileID)
+        centerOn(tileID: focusedTileID)
     }
 
     func zoomIn() {
@@ -926,34 +893,8 @@ final class CanvasViewController: NSViewController, CanvasCommandHandling {
         return (origin, span)
     }
 
-    private func configureFocusModeOverlay() {
-        focusModeOverlay.wantsLayer = true
-        focusModeOverlay.layer?.backgroundColor = NSColor(calibratedWhite: 0.02, alpha: 0.82).cgColor
-        focusModeOverlay.layer?.borderColor = NSColor(calibratedWhite: 1, alpha: 0.24).cgColor
-        focusModeOverlay.layer?.borderWidth = 1
-        focusModeOverlay.layer?.cornerRadius = 10
-        focusModeOverlay.layer?.zPosition = 1_000
-
-        focusModeButton.isBordered = false
-        focusModeButton.target = self
-        focusModeButton.action = #selector(toggleFocusViewportMode(_:))
-        focusModeButton.font = .systemFont(ofSize: 12, weight: .semibold)
-        focusModeButton.contentTintColor = NSColor(calibratedWhite: 1, alpha: 0.94)
-        updateFocusModeButtonTitle()
-        focusModeOverlay.addSubview(focusModeButton)
-    }
-
-    private func updateFocusModeButtonTitle() {
-        focusModeButton.title = focusViewportMode.controlLabel
-    }
-
     private func currentFocusViewportBehavior() -> FocusViewportBehavior {
-        switch focusViewportMode {
-        case .centerOnFocus:
-            return .center
-        case .revealFocusedTile:
-            return .revealIfNeeded
-        }
+        .revealIfNeeded
     }
 
     private func applyViewportBehavior(_ behavior: FocusViewportBehavior, to tileID: UUID) {
@@ -1008,12 +949,4 @@ final class CanvasViewController: NSViewController, CanvasCommandHandling {
         scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 
-    @objc private func toggleFocusViewportMode(_ sender: Any?) {
-        switch focusViewportMode {
-        case .centerOnFocus:
-            focusViewportMode = .revealFocusedTile
-        case .revealFocusedTile:
-            focusViewportMode = .centerOnFocus
-        }
-    }
 }
