@@ -148,6 +148,7 @@ final class CanvasTileContainerView: FlippedView {
     private let resizeOverlayView = TileResizeOverlayView(frame: .zero)
     private let rootLayer = CALayer()
     private var hoverTrackingArea: NSTrackingArea?
+    private var pillFadeWorkItem: DispatchWorkItem?
 
     var onSelect: (() -> Void)?
     var onResize: ((TileResizeEdges, CGPoint, Bool) -> Void)?
@@ -214,15 +215,30 @@ final class CanvasTileContainerView: FlippedView {
 
     override func mouseEntered(with event: NSEvent) {
         setTitlePillVisible(true)
+        schedulePillFade()
     }
 
     override func mouseExited(with event: NSEvent) {
+        pillFadeWorkItem?.cancel()
+        pillFadeWorkItem = nil
         setTitlePillVisible(false)
+    }
+
+    // Shown briefly on entry, then fades even while the mouse stays inside;
+    // it returns only after the mouse leaves and re-enters.
+    private func schedulePillFade() {
+        pillFadeWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.pillFadeWorkItem = nil
+            self?.setTitlePillVisible(false)
+        }
+        pillFadeWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: workItem)
     }
 
     private func setTitlePillVisible(_ visible: Bool) {
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.18
+            context.duration = visible ? 0.15 : 0.4
             titlePillView.animator().alphaValue = visible ? 1 : 0
         }
     }
