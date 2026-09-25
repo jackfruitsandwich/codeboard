@@ -21,22 +21,25 @@ struct TileResizeEdges: OptionSet {
 
 @MainActor
 class CanvasTile: NSObject {
-    let id = UUID()
+    let id: UUID
     let index: Int
     var position: GridPoint
     var span: GridSize
     let containerView: CanvasTileContainerView
 
     private(set) var isFocused = false
+    private(set) var displayTitle: String
 
     var onFocusRequested: ((UUID) -> Void)?
     var onCloseRequested: ((UUID) -> Void)?
     var onResizeRequested: ((UUID, TileResizeEdges, CGPoint, Bool) -> Void)?
 
-    init(index: Int, position: GridPoint, span: GridSize = .one, title: String, contentView: NSView) {
+    init(id: UUID = UUID(), index: Int, position: GridPoint, span: GridSize = .one, title: String, contentView: NSView) {
+        self.id = id
         self.index = index
         self.position = position
         self.span = span
+        self.displayTitle = title
         self.containerView = CanvasTileContainerView(title: title, contentView: contentView)
         super.init()
 
@@ -64,6 +67,7 @@ class CanvasTile: NSObject {
     }
 
     func setDisplayTitle(_ title: String) {
+        displayTitle = title
         containerView.setTitle(title)
     }
 
@@ -80,23 +84,29 @@ class CanvasTile: NSObject {
 final class TerminalTile: CanvasTile {
     var launchOptions: TerminalLaunchOptions
     var configTemplate: GhosttySurfaceTemplate?
+    let usesPersistentSession: Bool
 
     let terminalView: GhosttyTerminalView
 
     nonisolated(unsafe) var surface: ghostty_surface_t?
+    var onForkConversationRequested: ((UUID) -> Void)?
 
     init(
+        id: UUID = UUID(),
         index: Int,
         position: GridPoint,
         span: GridSize = .one,
         launchOptions: TerminalLaunchOptions,
-        configTemplate: GhosttySurfaceTemplate? = nil
+        configTemplate: GhosttySurfaceTemplate? = nil,
+        usesPersistentSession: Bool = false
     ) {
         self.launchOptions = launchOptions
         self.configTemplate = configTemplate
+        self.usesPersistentSession = usesPersistentSession
         self.terminalView = GhosttyTerminalView(frame: .zero)
 
         super.init(
+            id: id,
             index: index,
             position: position,
             span: span,
@@ -120,7 +130,16 @@ final class TerminalTile: CanvasTile {
         onCloseRequested?(id)
     }
 
+    func requestConversationFork() {
+        onForkConversationRequested?(id)
+    }
+
     override func needsConfirmClose() -> Bool {
+        if usesPersistentSession {
+            guard let command = TmuxSessionManager.shared.currentCommand(for: id)?.lowercased() else { return true }
+            let shellNames: Set<String> = ["bash", "dash", "fish", "ksh", "sh", "tcsh", "zsh"]
+            return !shellNames.contains(command)
+        }
         guard let surface else { return false }
         return ghostty_surface_needs_confirm_quit(surface)
     }
@@ -147,6 +166,7 @@ final class CanvasTileContainerView: FlippedView {
     private let rootLayer = CALayer()
     private var hoverTrackingArea: NSTrackingArea?
     private var pillFadeWorkItem: DispatchWorkItem?
+    private var isContentResizeDeferred = false
 
     var onSelect: (() -> Void)?
     var onResize: ((TileResizeEdges, CGPoint, Bool) -> Void)?
@@ -171,11 +191,35 @@ final class CanvasTileContainerView: FlippedView {
 
     override func layout() {
         super.layout()
+        layoutManagedSubviews()
+    }
 
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        layoutManagedSubviews()
+    }
+
+    func setCanvasFrame(_ frame: CGRect) {
+        self.frame = frame
+        layoutManagedSubviews()
+    }
+
+    private func layoutManagedSubviews() {
         cardView.frame = bounds
-        contentView.frame = bounds.insetBy(dx: contentInset, dy: contentInset)
+        if !isContentResizeDeferred {
+            contentView.frame = bounds.insetBy(dx: contentInset, dy: contentInset)
+        }
         layoutTitlePill()
         resizeOverlayView.frame = bounds
+    }
+
+    func setContentResizeDeferred(_ deferred: Bool) {
+        guard deferred != isContentResizeDeferred else { return }
+        isContentResizeDeferred = deferred
+        if !deferred {
+            needsLayout = true
+            layoutSubtreeIfNeeded()
+        }
     }
 
     func setTitle(_ title: String) {

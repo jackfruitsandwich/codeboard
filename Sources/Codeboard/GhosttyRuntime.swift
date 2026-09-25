@@ -337,6 +337,10 @@ final class GhosttyRuntime: @unchecked Sendable {
         if getenv("TERM_PROGRAM") == nil {
             setenv("TERM_PROGRAM", "ghostty", 1)
         }
+
+        if getenv("COLORTERM") == nil {
+            setenv("COLORTERM", "truecolor", 1)
+        }
     }
 
     private func installApplicationObservers() {

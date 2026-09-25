@@ -1,0 +1,316 @@
+#!/usr/bin/env python3
+"""Drive the running Codeboard canvas from a shell or an agent.
+
+Talks to Codeboard through its control directory: each call writes
+<id>.request.json and waits for <id>.response.json. Tile references accept a
+full id, a unique id prefix (4+ chars), or a tile index.
+"""
+
+import argparse
+import glob
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import uuid
+
+CONTROL_DIR = os.path.expanduser("~/Library/Application Support/com.jackdigilov.codeboard/control")
+CLAUDE_PROJECTS = os.path.expanduser("~/.claude/projects")
+SESSION_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+class CanvasError(Exception):
+    pass
+
+
+def request(command, args=None, timeout=10.0):
+    if subprocess.run(["pgrep", "-x", "codeboard"], capture_output=True).returncode != 0:
+        raise CanvasError("Codeboard is not running.")
+    if not os.path.isdir(CONTROL_DIR):
+        raise CanvasError("Codeboard has no control directory; the running build predates agent control "
+                          "(run ./scripts/codeboardctl reload in the codeboard repo).")
+
+    request_id = uuid.uuid4().hex
+    body = {"id": request_id, "command": command, "args": args or {}, "createdAt": time.time()}
+    temporary = os.path.join(CONTROL_DIR, f".{request_id}.tmp")
+    request_path = os.path.join(CONTROL_DIR, f"{request_id}.request.json")
+    response_path = os.path.join(CONTROL_DIR, f"{request_id}.response.json")
+    with open(temporary, "w") as handle:
+        json.dump(body, handle)
+    os.rename(temporary, request_path)
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if os.path.exists(response_path):
+            with open(response_path) as handle:
+                response = json.load(handle)
+            os.remove(response_path)
+            if not response.get("ok"):
+                raise CanvasError(response.get("error") or "Codeboard refused the request.")
+            return response.get("result")
+        time.sleep(0.025)
+
+    try:
+        os.remove(request_path)
+    except FileNotFoundError:
+        pass
+    raise CanvasError(f"Codeboard did not answer within {timeout:g}s.")
+
+
+def parse_pair(text, separator, name):
+    try:
+        first, second = text.lower().split(separator)
+        return int(first), int(second)
+    except ValueError:
+        raise CanvasError(f"{name} must look like A{separator}B with integers, got {text!r}.")
+
+
+def geometry(args):
+    result = {}
+    if getattr(args, "at", None):
+        result["x"], result["y"] = parse_pair(args.at, ",", "--at")
+    if getattr(args, "size", None):
+        result["width"], result["height"] = parse_pair(args.size, "x", "--size")
+    return result
+
+
+def own_tile_id():
+    return (os.environ.get("CODEBOARD_TILE_ID") or "").lower() or None
+
+
+def claude_session_cwd(session_id):
+    """The directory the Claude session was started in.
+
+    Later entries record wherever the agent last `cd`'d, which is not the
+    session's project; resuming from there opens the wrong workspace.
+    """
+    paths = glob.glob(os.path.join(CLAUDE_PROJECTS, "*", f"{session_id}.jsonl"))
+    if not paths:
+        raise CanvasError(f"No Claude session log found for {session_id}.")
+    with open(paths[0], errors="replace") as handle:
+        for line in handle:
+            if '"cwd"' not in line:
+                continue
+            try:
+                cwd = json.loads(line).get("cwd")
+            except json.JSONDecodeError:
+                continue
+            if cwd:
+                return cwd
+    return os.path.expanduser("~")
+
+
+def processes_holding_session(session_id):
+    listing = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True).stdout
+    holders = []
+    for line in listing.splitlines():
+        pid, _, command = line.strip().partition(" ")
+        if session_id in command and "codeboard-canvas" not in command:
+            holders.append((pid, command))
+    sessions_dir = os.path.expanduser("~/.claude/sessions")
+    for path in glob.glob(os.path.join(sessions_dir, "*.json")):
+        try:
+            with open(path) as handle:
+                record = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            continue
+        pid = os.path.basename(path)[:-5]
+        if record.get("sessionId") == session_id and pid.isdigit():
+            if subprocess.run(["kill", "-0", pid], capture_output=True).returncode == 0:
+                if all(existing != pid for existing, _ in holders):
+                    holders.append((pid, "claude (session record)"))
+    return holders
+
+
+def print_state(state):
+    viewport = state["viewport"]
+    print(f"zoom {state['zoom']:.2f} (range {state['minZoom']:.2f}-{state['maxZoom']:.2f})  "
+          f"viewport x={viewport['x']:.1f} y={viewport['y']:.1f} "
+          f"w={viewport['width']:.1f} h={viewport['height']:.1f} grid units")
+    mine = own_tile_id()
+    for tile in state["tiles"]:
+        marker = "*" if tile["focused"] else " "
+        rect = f"{tile['x']},{tile['y']} {tile['width']}x{tile['height']}"
+        line = f"{marker} #{tile['index']:<3} {tile['id'][:8]}  {tile['kind']:<8} {rect:<11} {tile['title']}"
+        if tile["kind"] == "terminal":
+            command = tile.get("command") or "?"
+            if re.fullmatch(r"\d+\.\d+\.\d+", command):
+                command = f"claude {command}"  # Claude Code's native binary is named after its version
+            line += f"  [{command} in {tile.get('cwd') or '?'}]"
+            if tile.get("claudeSessionID"):
+                line += f"  claude={tile['claudeSessionID']}"
+        else:
+            line += f"  [{tile.get('url') or 'blank'}]"
+        if tile["id"] == mine:
+            line += "  (this tile)"
+        print(line)
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="codeboard-canvas", description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--json", action="store_true", help="print raw JSON results")
+    parser.add_argument("--timeout", type=float, default=10.0)
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    commands.add_parser("state", help="list tiles, zoom, and viewport (grid units)")
+
+    new_terminal = commands.add_parser("new-terminal", help="open a terminal tile")
+    new_terminal.add_argument("--at", help="grid origin X,Y (default: free cells near focus)")
+    new_terminal.add_argument("--size", help="span WxH in grid units (default 1x1)")
+    new_terminal.add_argument("--cwd", help="working directory (default: home)")
+    new_terminal.add_argument("--run", help="shell command typed into the new shell")
+    new_terminal.add_argument("--focus", action="store_true", help="focus the new tile")
+
+    open_claude = commands.add_parser("open-claude", help="open a Claude Code session in a new tile")
+    open_claude.add_argument("session_id")
+    open_claude.add_argument("--at")
+    open_claude.add_argument("--size")
+    open_claude.add_argument("--cwd", help="default: the directory the session was started in")
+    open_claude.add_argument("--focus", action="store_true")
+    open_claude.add_argument("--same-session", action="store_true",
+                             help="resume the session itself instead of a fork (refused while another process has it open)")
+    open_claude.add_argument("--force", action="store_true", help="with --same-session, open it even if it is live elsewhere")
+
+    new_browser = commands.add_parser("new-browser", help="open a browser tile")
+    new_browser.add_argument("url", nargs="?")
+    new_browser.add_argument("--at")
+    new_browser.add_argument("--size")
+    new_browser.add_argument("--focus", action="store_true")
+
+    move = commands.add_parser("move", help="move/resize one tile")
+    move.add_argument("tile")
+    move.add_argument("at", help="grid origin X,Y")
+    move.add_argument("--size", help="new span WxH (default: keep)")
+
+    arrange = commands.add_parser("arrange", help="move several tiles atomically: TILE=X,Y[,WxH] ...")
+    arrange.add_argument("placements", nargs="+")
+
+    grid = commands.add_parser("grid", help="lay tiles out row-major in a grid, atomically")
+    grid.add_argument("tiles", nargs="+")
+    grid.add_argument("--cols", type=int, required=True)
+    grid.add_argument("--size", default="1x1", help="span of every tile (default 1x1)")
+    grid.add_argument("--at", default="0,0", help="grid origin of the first cell")
+
+    focus = commands.add_parser("focus", help="focus a tile and bring it into view")
+    focus.add_argument("tile")
+    focus.add_argument("--center", action="store_true")
+
+    close = commands.add_parser("close", help="close a tile and end its shell")
+    close.add_argument("tile")
+    close.add_argument("--force", action="store_true", help="allow closing the tile this command runs in")
+
+    zoom = commands.add_parser("zoom", help="set zoom scale")
+    zoom.add_argument("scale", type=float)
+
+    fit = commands.add_parser("fit", help="zoom and scroll so tiles (default: all) fill the window")
+    fit.add_argument("tiles", nargs="*")
+    fit.add_argument("--margin", type=float, default=24, help="points of padding (default 24)")
+
+    raw = commands.add_parser("raw", help="send a raw command with a JSON args object")
+    raw.add_argument("name")
+    raw.add_argument("args", nargs="?", default="{}")
+
+    args = parser.parse_args()
+    call = lambda name, payload=None: request(name, payload, timeout=args.timeout)
+
+    if args.command == "state":
+        state = call("state")
+        if args.json:
+            print(json.dumps(state, indent=2))
+        else:
+            print_state(state)
+        return
+
+    if args.command == "new-terminal":
+        payload = geometry(args) | {"focus": args.focus}
+        if args.cwd:
+            payload["cwd"] = args.cwd
+        if args.run:
+            payload["command"] = args.run
+        result = call("new-terminal", payload)
+    elif args.command == "open-claude":
+        session_id = args.session_id.lower()
+        if not SESSION_ID_RE.match(session_id):
+            raise CanvasError(f"{args.session_id!r} is not a Claude session id.")
+        cwd = args.cwd or claude_session_cwd(session_id)
+        command = f"claude --resume {session_id}"
+        if args.same_session:
+            holders = processes_holding_session(session_id)
+            if holders and not args.force:
+                listing = "; ".join(f"pid {pid}: {cmd[:80]}" for pid, cmd in holders)
+                raise CanvasError(f"Session {session_id} is open elsewhere ({listing}). Two live processes "
+                                  "on one session branch its log; open a fork instead, or pass --force.")
+        else:
+            command += " --fork-session"
+        payload = geometry(args) | {"focus": args.focus, "cwd": cwd, "command": command}
+        result = call("new-terminal", payload) | {"cwd": cwd, "command": command}
+    elif args.command == "new-browser":
+        payload = geometry(args) | {"focus": args.focus}
+        if args.url:
+            payload["url"] = args.url
+        result = call("new-browser", payload)
+    elif args.command == "move":
+        x, y = parse_pair(args.at, ",", "position")
+        placement = {"tile": args.tile, "x": x, "y": y}
+        if args.size:
+            placement["width"], placement["height"] = parse_pair(args.size, "x", "--size")
+        result = call("place", {"tiles": [placement]})
+    elif args.command == "arrange":
+        placements = []
+        for item in args.placements:
+            tile, _, spec = item.partition("=")
+            parts = spec.split(",")
+            if not tile or len(parts) not in (2, 3):
+                raise CanvasError(f"Placements look like TILE=X,Y or TILE=X,Y,WxH; got {item!r}.")
+            placement = {"tile": tile, "x": int(parts[0]), "y": int(parts[1])}
+            if len(parts) == 3:
+                placement["width"], placement["height"] = parse_pair(parts[2], "x", "size")
+            placements.append(placement)
+        result = call("place", {"tiles": placements})
+    elif args.command == "grid":
+        if args.cols < 1:
+            raise CanvasError("--cols must be at least 1.")
+        width, height = parse_pair(args.size, "x", "--size")
+        origin_x, origin_y = parse_pair(args.at, ",", "--at")
+        placements = [{
+            "tile": tile,
+            "x": origin_x + (position % args.cols) * width,
+            "y": origin_y + (position // args.cols) * height,
+            "width": width,
+            "height": height,
+        } for position, tile in enumerate(args.tiles)]
+        result = call("place", {"tiles": placements})
+    elif args.command == "focus":
+        result = call("focus", {"tile": args.tile, "center": args.center})
+    elif args.command == "close":
+        mine = own_tile_id()
+        if mine and not args.force:
+            state = call("state")
+            target = [t for t in state["tiles"]
+                      if t["id"] == args.tile.lower() or t["id"].startswith(args.tile.lower())
+                      or str(t["index"]) == args.tile.lstrip("#")]
+            if any(t["id"] == mine for t in target):
+                raise CanvasError("Refusing to close the tile this command is running in (pass --force).")
+        result = call("close", {"tile": args.tile})
+    elif args.command == "zoom":
+        result = call("zoom", {"scale": args.scale})
+    elif args.command == "fit":
+        result = call("fit", {"tiles": args.tiles, "margin": args.margin})
+    elif args.command == "raw":
+        result = call(args.name, json.loads(args.args))
+    else:
+        parser.error(f"unknown command {args.command}")
+        return
+
+    print(json.dumps(result, indent=2 if args.json else None))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except CanvasError as error:
+        print(f"codeboard-canvas: {error}", file=sys.stderr)
+        sys.exit(1)

@@ -15,6 +15,41 @@ enum AppPaths {
         appSupportDirectory.appendingPathComponent(configFilename, isDirectory: false)
     }
 
+    static var tmuxConfigURL: URL {
+        appSupportDirectory.appendingPathComponent("tmux.conf", isDirectory: false)
+    }
+
+    static var agentWrapperDirectory: URL {
+        appSupportDirectory.appendingPathComponent("agent-bin", isDirectory: true)
+    }
+
+    static var agentSessionDirectory: URL {
+        appSupportDirectory.appendingPathComponent("agent-sessions", isDirectory: true)
+    }
+
+    static func claudeSessionURL(for tileID: UUID) -> URL {
+        agentSessionDirectory.appendingPathComponent(
+            "claude-\(tileID.uuidString.lowercased()).session",
+            isDirectory: false
+        )
+    }
+
+    static var workspaceStateURL: URL {
+        appSupportDirectory.appendingPathComponent("workspace.json", isDirectory: false)
+    }
+
+    static var fullscreenDesktopURL: URL {
+        appSupportDirectory.appendingPathComponent("fullscreen-desktop.png", isDirectory: false)
+    }
+
+    static var reloadRequestDirectory: URL {
+        appSupportDirectory.appendingPathComponent("reload-requests", isDirectory: true)
+    }
+
+    static var controlDirectory: URL {
+        appSupportDirectory.appendingPathComponent("control", isDirectory: true)
+    }
+
     static func ensureConfigFileExists() {
         let fileManager = FileManager.default
         try? fileManager.createDirectory(at: appSupportDirectory, withIntermediateDirectories: true)

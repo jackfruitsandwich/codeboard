@@ -140,6 +140,53 @@ final class CanvasModel {
         return true
     }
 
+    /// Moves several tiles at once. Moving tiles may swap or overlap each
+    /// other's old cells, but the final rects must not overlap each other or
+    /// any tile that is not moving. On failure nothing changes.
+    @discardableResult
+    func updateAll(_ placements: [UUID: GridRect]) -> Bool {
+        guard placements.keys.allSatisfy({ pointByTileID[$0] != nil }) else { return false }
+        let originalRects = placements.keys.compactMap { tileID in rect(for: tileID).map { (tileID, $0) } }
+
+        for (tileID, rect) in originalRects {
+            for occupiedPoint in occupiedPoints(origin: rect.origin, size: rect.size) where tileIDByPoint[occupiedPoint] == tileID {
+                tileIDByPoint.removeValue(forKey: occupiedPoint)
+            }
+        }
+
+        var placed: [(UUID, GridRect)] = []
+        var succeeded = true
+        for (tileID, rect) in placements {
+            guard canPlace(tileID: tileID, at: rect.origin, size: rect.size) else {
+                succeeded = false
+                break
+            }
+            for occupiedPoint in occupiedPoints(origin: rect.origin, size: rect.size) {
+                tileIDByPoint[occupiedPoint] = tileID
+            }
+            placed.append((tileID, rect))
+        }
+
+        let finalRects = succeeded ? placed : originalRects
+        if !succeeded {
+            for (tileID, rect) in placed {
+                for occupiedPoint in occupiedPoints(origin: rect.origin, size: rect.size) where tileIDByPoint[occupiedPoint] == tileID {
+                    tileIDByPoint.removeValue(forKey: occupiedPoint)
+                }
+            }
+            for (tileID, rect) in originalRects {
+                for occupiedPoint in occupiedPoints(origin: rect.origin, size: rect.size) {
+                    tileIDByPoint[occupiedPoint] = tileID
+                }
+            }
+        }
+        for (tileID, rect) in finalRects {
+            pointByTileID[tileID] = rect.origin
+            sizeByTileID[tileID] = rect.size
+        }
+        return succeeded
+    }
+
     @discardableResult
     func remove(tileID: UUID) -> GridPoint? {
         guard let point = pointByTileID.removeValue(forKey: tileID) else { return nil }

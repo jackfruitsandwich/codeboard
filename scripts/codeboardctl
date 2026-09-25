@@ -1,0 +1,211 @@
+#!/usr/bin/env zsh
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+APP_BUNDLE="/Applications/Codeboard.app"
+BACKUP_BUNDLE="/Applications/.Codeboard.rollback.app"
+REQUEST_DIR="$HOME/Library/Application Support/com.jackdigilov.codeboard/reload-requests"
+LOCK_DIR="${TMPDIR:-/tmp}/codeboard-reload-${UID}.lock"
+TIMEOUT="${CODEBOARD_RELOAD_TIMEOUT:-12}"
+
+usage() {
+  echo "usage: $0 reload [--release] [--dry-run]" >&2
+  exit 2
+}
+
+[[ "${1:-}" == "reload" ]] || usage
+shift
+
+configuration="debug"
+dry_run=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --release) configuration="release" ;;
+    --dry-run) dry_run=1 ;;
+    *) usage ;;
+  esac
+  shift
+done
+
+if [[ "$TIMEOUT" != <-> || "$TIMEOUT" -le 0 ]]; then
+  echo "CODEBOARD_RELOAD_TIMEOUT must be a positive integer." >&2
+  exit 2
+fi
+
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  lock_pid="$(<"$LOCK_DIR/pid" 2>/dev/null || true)"
+  if [[ "$lock_pid" == <-> ]] && kill -0 "$lock_pid" 2>/dev/null; then
+    echo "Another Codeboard reload is already in progress (pid $lock_pid)." >&2
+    exit 1
+  fi
+  rm -rf "$LOCK_DIR"
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo "Could not recover the stale Codeboard reload lock." >&2
+    exit 1
+  fi
+fi
+print -r -- "$$" > "$LOCK_DIR/pid"
+
+stage_bundle="/Applications/.Codeboard.stage-${$}.app"
+ready_file="${TMPDIR:-/tmp}/codeboard-ready-${$}.json"
+started_at="$SECONDS"
+had_previous_bundle=0
+installed_candidate=0
+old_pids=()
+
+rm -f "$ready_file"
+
+bundle_is_valid() {
+  local bundle="$1"
+  [[ -x "$bundle/Contents/MacOS/codeboard" ]] || return 1
+  codesign --verify --deep "$bundle" >/dev/null 2>&1
+}
+
+installed_codeboard_pids() {
+  local pid command
+  for pid in ${(f)"$(pgrep -x codeboard 2>/dev/null || true)"}; do
+    command="$(ps -ww -p "$pid" -o command= 2>/dev/null || true)"
+    if [[ "$command" == "$APP_BUNDLE/Contents/MacOS/codeboard"* ]]; then
+      print -r -- "$pid"
+    fi
+  done
+}
+
+cleanup() {
+  rm -rf "$stage_bundle" "$LOCK_DIR"
+  rm -f "$ready_file"
+  local pid
+  for pid in "${old_pids[@]}"; do
+    rm -f "$REQUEST_DIR/${pid}.json"
+  done
+}
+trap cleanup EXIT INT TERM
+
+rollback() {
+  echo "Candidate did not become healthy; restoring the previous Codeboard." >&2
+  if [[ $installed_candidate -eq 1 ]]; then
+    rm -rf "$APP_BUNDLE"
+  fi
+  if [[ $had_previous_bundle -eq 1 && -d "$BACKUP_BUNDLE" ]]; then
+    mv "$BACKUP_BUNDLE" "$APP_BUNDLE"
+    local old_app_is_alive=0
+    local pid
+    for pid in "${old_pids[@]}"; do
+      if kill -0 "$pid" 2>/dev/null; then
+        old_app_is_alive=1
+      fi
+    done
+    if (( old_app_is_alive == 0 )); then
+      open -n -a "$APP_BUNDLE" >/dev/null 2>&1 || true
+    else
+      echo "The original Codeboard process is still running; the bundle was restored without launching a second instance." >&2
+    fi
+  fi
+}
+
+wait_for_pids_to_exit() {
+  local deadline=$((SECONDS + TIMEOUT))
+  local pid
+  while (( SECONDS < deadline )); do
+    local any_alive=0
+    for pid in "$@"; do
+      if kill -0 "$pid" 2>/dev/null; then
+        any_alive=1
+      fi
+    done
+    (( any_alive == 0 )) && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+wait_for_readiness() {
+  local deadline=$((SECONDS + TIMEOUT))
+  while (( SECONDS < deadline )); do
+    [[ -s "$ready_file" ]] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+cd "$ROOT_DIR"
+echo "Building Codeboard ($configuration); the running app will stay open..."
+swift build -c "$configuration"
+
+CODEBOARD_APP_BUNDLE="$stage_bundle" CODEBOARD_SKIP_BUILD=1 \
+  "$ROOT_DIR/scripts/install-macos-app.sh" "$configuration"
+
+[[ -x "$stage_bundle/Contents/MacOS/codeboard" ]] || {
+  echo "Candidate bundle is missing its executable." >&2
+  exit 1
+}
+codesign --verify --deep "$stage_bundle" >/dev/null 2>&1 || {
+  echo "Candidate bundle failed code-sign verification." >&2
+  exit 1
+}
+
+if [[ $dry_run -eq 1 ]]; then
+  echo "Dry run passed in $((SECONDS - started_at))s; the installed app was untouched."
+  exit 0
+fi
+
+old_pids=( ${(f)"$(installed_codeboard_pids)"} )
+
+if [[ -e "$BACKUP_BUNDLE" ]]; then
+  if bundle_is_valid "$APP_BUNDLE"; then
+    rm -rf "$BACKUP_BUNDLE"
+  elif bundle_is_valid "$BACKUP_BUNDLE"; then
+    echo "Recovering the valid Codeboard rollback bundle left by an interrupted reload." >&2
+    rm -rf "$APP_BUNDLE"
+    mv "$BACKUP_BUNDLE" "$APP_BUNDLE"
+  else
+    echo "A stale rollback bundle exists, but neither installed copy verifies; refusing to overwrite either one." >&2
+    exit 1
+  fi
+fi
+if [[ -d "$APP_BUNDLE" ]]; then
+  mv "$APP_BUNDLE" "$BACKUP_BUNDLE"
+  had_previous_bundle=1
+fi
+mv "$stage_bundle" "$APP_BUNDLE"
+installed_candidate=1
+
+if (( ${#old_pids[@]} > 0 )); then
+  mkdir -p "$REQUEST_DIR"
+  nonce="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+  for pid in "${old_pids[@]}"; do
+    request_tmp="$REQUEST_DIR/.${pid}.${$}.tmp"
+    printf '{"pid":%s,"nonce":"%s"}\n' "$pid" "$nonce" > "$request_tmp"
+    mv "$request_tmp" "$REQUEST_DIR/${pid}.json"
+  done
+  if ! wait_for_pids_to_exit "${old_pids[@]}"; then
+    echo "The running Codeboard did not accept the private reload request; trying the legacy quit path once." >&2
+    osascript -e 'tell application id "com.jackdigilov.codeboard" to quit' >/dev/null 2>&1 || true
+    if ! wait_for_pids_to_exit "${old_pids[@]}"; then
+      rollback
+      echo "The running Codeboard did not terminate before the timeout." >&2
+      exit 1
+    fi
+  fi
+fi
+
+open -n -a "$APP_BUNDLE" --args --codeboard-ready-token "$ready_file"
+if ! wait_for_readiness; then
+  candidate_pids=()
+  for pid in ${(f)"$(pgrep -x codeboard 2>/dev/null || true)"}; do
+    candidate_command="$(ps -ww -p "$pid" -o command= 2>/dev/null || true)"
+    if [[ "$candidate_command" == "$APP_BUNDLE/Contents/MacOS/codeboard"*"--codeboard-ready-token $ready_file"* ]]; then
+      candidate_pids+=("$pid")
+    fi
+  done
+  for pid in "${candidate_pids[@]}"; do
+    kill "$pid" >/dev/null 2>&1 || true
+  done
+  wait_for_pids_to_exit "${candidate_pids[@]}" || true
+  rollback
+  exit 1
+fi
+
+rm -rf "$BACKUP_BUNDLE"
+installed_candidate=0
+echo "Codeboard reloaded successfully in $((SECONDS - started_at))s."

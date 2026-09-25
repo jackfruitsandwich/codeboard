@@ -8,6 +8,15 @@ final class GhosttyTerminalView: NSView, NSMenuItemValidation {
 
     private var trackingArea: NSTrackingArea?
     private var lastDrawableSize = CGSize.zero
+    private var lastSurfaceSize = CGSize.zero
+    private var lastContentScale = CGSize.zero
+    private var lastSurfaceColumns: UInt16 = 0
+    private var lastSurfaceRows: UInt16 = 0
+    private var pendingResizeSignalRelay: DispatchWorkItem?
+    private var suppressNextRightMouseUp = false
+    private var tmuxCopyModeMayBeActive = false
+    private var cachedPaneAcceptsMouseInput: Bool?
+    private var lastPaneMouseQueryTime: TimeInterval = 0
 
     override var acceptsFirstResponder: Bool { true }
     override var isOpaque: Bool { false }
@@ -43,6 +52,8 @@ final class GhosttyTerminalView: NSView, NSMenuItemValidation {
     }
 
     func detachFromTile() {
+        pendingResizeSignalRelay?.cancel()
+        pendingResizeSignalRelay = nil
         tile = nil
     }
 
@@ -107,10 +118,20 @@ final class GhosttyTerminalView: NSView, NSMenuItemValidation {
     override func rightMouseDown(with event: NSEvent) {
         tile?.requestFocus()
         window?.makeFirstResponder(self)
+        if let surface = ensureSurface(), shouldShowContextMenu(surface: surface) {
+            suppressNextRightMouseUp = true
+            NSMenu.popUpContextMenu(conversationContextMenu(), with: event, for: self)
+            return
+        }
+        suppressNextRightMouseUp = false
         sendMouseButton(event, state: GHOSTTY_MOUSE_PRESS, button: GHOSTTY_MOUSE_RIGHT)
     }
 
     override func rightMouseUp(with event: NSEvent) {
+        if suppressNextRightMouseUp {
+            suppressNextRightMouseUp = false
+            return
+        }
         sendMouseButton(event, state: GHOSTTY_MOUSE_RELEASE, button: GHOSTTY_MOUSE_RIGHT)
     }
 
@@ -144,6 +165,21 @@ final class GhosttyTerminalView: NSView, NSMenuItemValidation {
         guard let surface = ensureSurface() else {
             super.scrollWheel(with: event)
             return
+        }
+
+        if !tmuxCopyModeMayBeActive, let tile, tile.usesPersistentSession {
+            let now = ProcessInfo.processInfo.systemUptime
+            if cachedPaneAcceptsMouseInput == nil || now - lastPaneMouseQueryTime > 0.5 {
+                cachedPaneAcceptsMouseInput = TmuxSessionManager.shared.paneAcceptsMouseInput(for: tile.id)
+                lastPaneMouseQueryTime = now
+            }
+            if cachedPaneAcceptsMouseInput == false {
+                // tmux implements shell scrollback by entering copy mode.
+                // Remember that transition so the next typed key can leave
+                // copy mode before being delivered, matching normal terminal
+                // scrollback behavior.
+                tmuxCopyModeMayBeActive = true
+            }
         }
 
         var x = event.scrollingDeltaX
@@ -214,6 +250,11 @@ final class GhosttyTerminalView: NSView, NSMenuItemValidation {
             return
         }
 
+        if tmuxCopyModeMayBeActive, let tile, tile.usesPersistentSession {
+            tmuxCopyModeMayBeActive = false
+            TmuxSessionManager.shared.cancelCopyMode(for: tile.id)
+        }
+
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if flags.contains(.command), !flags.contains(.control), !flags.contains(.option) {
             super.keyDown(with: event)
@@ -265,7 +306,11 @@ final class GhosttyTerminalView: NSView, NSMenuItemValidation {
             return
         }
 
-        var keyEvent = ghosttyKeyEvent(for: event, surface: surface, action: GHOSTTY_ACTION_PRESS)
+        guard let action = modifierAction(for: event) else {
+            super.flagsChanged(with: event)
+            return
+        }
+        var keyEvent = ghosttyKeyEvent(for: event, surface: surface, action: action)
         keyEvent.text = nil
         _ = ghostty_surface_key(surface, keyEvent)
         sendMousePosition(event)
@@ -294,8 +339,15 @@ final class GhosttyTerminalView: NSView, NSMenuItemValidation {
     }
 
     @IBAction func copy(_ sender: Any?) {
-        guard let surface = ensureSurface(), ghostty_surface_has_selection(surface) else { return }
-        _ = performBindingAction("copy_to_clipboard")
+        guard let surface = ensureSurface() else { return }
+        if ghostty_surface_has_selection(surface) {
+            _ = performBindingAction("copy_to_clipboard")
+            return
+        }
+        if let tile, tile.usesPersistentSession,
+           TmuxSessionManager.shared.copySelectionFromCopyMode(for: tile.id) {
+            tmuxCopyModeMayBeActive = false
+        }
     }
 
     @IBAction func paste(_ sender: Any?) {
@@ -306,16 +358,46 @@ final class GhosttyTerminalView: NSView, NSMenuItemValidation {
         _ = performBindingAction("paste_from_clipboard")
     }
 
+    @objc private func forkConversation(_ sender: Any?) {
+        tile?.requestConversationFork()
+    }
+
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
         case #selector(copy(_:)):
-            guard let surface = ensureSurface() else { return false }
-            return ghostty_surface_has_selection(surface)
+            // A tmux-backed TUI may own the visible selection and publish it
+            // through OSC 52, leaving no selection in the outer Ghostty
+            // surface. Keep Cmd-C consumable in that case; the private tmux
+            // hook has already synchronized the selection to the pasteboard.
+            return ensureSurface() != nil
         case #selector(paste(_:)), #selector(pasteAsPlainText(_:)):
             return NSPasteboard.general.string(forType: .string) != nil
         default:
             return true
         }
+    }
+
+    private func conversationContextMenu() -> NSMenu {
+        let menu = NSMenu(title: "Terminal")
+
+        let copyItem = NSMenuItem(title: "Copy", action: #selector(copy(_:)), keyEquivalent: "")
+        copyItem.target = self
+        menu.addItem(copyItem)
+
+        let pasteItem = NSMenuItem(title: "Paste", action: #selector(paste(_:)), keyEquivalent: "")
+        pasteItem.target = self
+        menu.addItem(pasteItem)
+
+        menu.addItem(.separator())
+
+        let forkItem = NSMenuItem(
+            title: "Fork Conversation",
+            action: #selector(forkConversation(_:)),
+            keyEquivalent: ""
+        )
+        forkItem.target = self
+        menu.addItem(forkItem)
+        return menu
     }
 
     private func createSurfaceIfPossible() {
@@ -354,23 +436,63 @@ final class GhosttyTerminalView: NSView, NSMenuItemValidation {
         let backing = convertToBacking(bounds).size
         guard backing.width > 0, backing.height > 0 else { return }
 
-        let xScale = backing.width / bounds.width
-        let yScale = backing.height / bounds.height
-        ghostty_surface_set_content_scale(surface, xScale, yScale)
-        ghostty_surface_set_size(surface, UInt32(max(1, Int(backing.width))), UInt32(max(1, Int(backing.height))))
-        syncSurfaceDisplayID(surface)
+        let pixelSize = CGSize(width: floor(backing.width), height: floor(backing.height))
+        let sizeChanged = lastSurfaceSize != pixelSize
+        let contentScale = CGSize(
+            width: backing.width / bounds.width,
+            height: backing.height / bounds.height
+        )
+        let contentScaleChanged = lastContentScale != contentScale
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         layer?.contentsScale = window.backingScaleFactor
         if let metalLayer = layer as? CAMetalLayer {
-            let drawableSize = CGSize(width: floor(backing.width), height: floor(backing.height))
-            if lastDrawableSize != drawableSize {
-                metalLayer.drawableSize = drawableSize
-                lastDrawableSize = drawableSize
+            if lastDrawableSize != pixelSize {
+                metalLayer.drawableSize = pixelSize
+                lastDrawableSize = pixelSize
             }
         }
         CATransaction.commit()
+
+        ghostty_surface_set_content_scale(surface, contentScale.width, contentScale.height)
+        if sizeChanged || contentScaleChanged {
+            ghostty_surface_set_size(
+                surface,
+                UInt32(max(1, Int(pixelSize.width))),
+                UInt32(max(1, Int(pixelSize.height)))
+            )
+            let surfaceSize = ghostty_surface_size(surface)
+            let gridChanged = lastSurfaceColumns > 0
+                && lastSurfaceRows > 0
+                && (lastSurfaceColumns != surfaceSize.columns || lastSurfaceRows != surfaceSize.rows)
+            lastSurfaceColumns = surfaceSize.columns
+            lastSurfaceRows = surfaceSize.rows
+            lastSurfaceSize = pixelSize
+            lastContentScale = contentScale
+            ghostty_surface_refresh(surface)
+            GhosttyRuntime.shared.tickNow()
+            if gridChanged {
+                scheduleResizeSignalRelay()
+            }
+        }
+        syncSurfaceDisplayID(surface)
+    }
+
+    private func scheduleResizeSignalRelay() {
+        guard let tile,
+              tile.usesPersistentSession,
+              let panePID = TmuxSessionManager.shared.panePID(for: tile.id) else {
+            return
+        }
+
+        pendingResizeSignalRelay?.cancel()
+        let workItem = TerminalResizeSignalRelay.workItem(for: panePID)
+        pendingResizeSignalRelay = workItem
+        DispatchQueue.global(qos: .utility).asyncAfter(
+            deadline: .now() + 0.15,
+            execute: workItem
+        )
     }
 
     private func applyAppearanceColorScheme() {
@@ -404,10 +526,29 @@ final class GhosttyTerminalView: NSView, NSMenuItemValidation {
         if flags.contains(.control) { raw |= GHOSTTY_MODS_CTRL.rawValue }
         if flags.contains(.option) { raw |= GHOSTTY_MODS_ALT.rawValue }
         if flags.contains(.command) { raw |= GHOSTTY_MODS_SUPER.rawValue }
+        if flags.contains(.capsLock) { raw |= GHOSTTY_MODS_CAPS.rawValue }
         return ghostty_input_mods_e(rawValue: raw)
     }
 
+    private func modifierAction(for event: NSEvent) -> ghostty_input_action_e? {
+        let flag: NSEvent.ModifierFlags
+        switch event.keyCode {
+        case 0x39: flag = .capsLock
+        case 0x38, 0x3C: flag = .shift
+        case 0x3B, 0x3E: flag = .control
+        case 0x3A, 0x3D: flag = .option
+        case 0x37, 0x36: flag = .command
+        case 0x3F: flag = .function
+        default: return nil
+        }
+        return event.modifierFlags.contains(flag) ? GHOSTTY_ACTION_PRESS : GHOSTTY_ACTION_RELEASE
+    }
+
     private func unshiftedCodepoint(from event: NSEvent) -> UInt32 {
+        // Modifier-only events do not carry character data. AppKit raises an
+        // NSInternalInconsistencyException if characters(byApplyingModifiers:)
+        // is sent to a flagsChanged event.
+        guard event.type == .keyDown || event.type == .keyUp else { return 0 }
         guard let chars = event.characters(byApplyingModifiers: []) ?? event.charactersIgnoringModifiers ?? event.characters,
               let scalar = chars.unicodeScalars.first else {
             return 0
@@ -468,6 +609,17 @@ final class GhosttyTerminalView: NSView, NSMenuItemValidation {
         default:
             return GHOSTTY_MOUSE_UNKNOWN
         }
+    }
+
+    private func shouldShowContextMenu(surface: ghostty_surface_t) -> Bool {
+        if let tile, tile.usesPersistentSession {
+            switch TmuxSessionManager.shared.paneAcceptsMouseInput(for: tile.id) {
+            case false: return true
+            case true: return false
+            case nil: break
+            }
+        }
+        return !ghostty_surface_mouse_captured(surface)
     }
 
     private func syncSurfaceDisplayID(_ surface: ghostty_surface_t) {

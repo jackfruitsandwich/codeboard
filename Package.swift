@@ -27,5 +27,10 @@ let package = Package(
                 .linkedLibrary("c++"),
             ]
         ),
+        .testTarget(
+            name: "CodeboardTests",
+            dependencies: ["Codeboard"],
+            path: "Tests/CodeboardTests"
+        ),
     ]
 )

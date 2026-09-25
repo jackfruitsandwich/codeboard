@@ -1,5 +1,8 @@
 .DS_Store
 .build
 .swiftpm
+__pycache__/
+.claude/settings.local.json
+vendor/
 GhosttyKit.xcframework
 GhosttyKit 2.xcframework

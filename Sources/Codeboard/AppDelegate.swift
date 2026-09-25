@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, NSWindowDelegate {
     static var shared: AppDelegate?
 
     private var window: CanvasWindow?
@@ -14,6 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        canvasController.saveWorkspaceNow(windowFrame: window?.frame)
         GhosttyRuntime.shared.shutdown()
     }
 
@@ -22,6 +23,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if DevelopmentReloadCoordinator.shared.isDevelopmentReload {
+            canvasController.saveWorkspaceNow(windowFrame: window?.frame)
+            return .terminateNow
+        }
         guard canvasController.needsQuitConfirmation() else { return .terminateNow }
 
         let alert = NSAlert()
@@ -39,17 +44,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         Self.shared = self
 
         AppPaths.ensureConfigFileExists()
+        do {
+            try AgentWrapperInstaller.ensureInstalled()
+        } catch {
+            NSLog("codeboard: could not install Claude session wrappers: %@", error.localizedDescription)
+        }
         guard GhosttyRuntime.shared.start(configURL: AppPaths.configURL) else {
             presentStartupFailureAlert()
             NSApp.terminate(nil)
             return
         }
 
+        let restoredState = WorkspaceStore.shared.load()
         buildMenu()
-        buildWindow()
+        buildWindow(restoring: restoredState)
+        let didRestore = restoredState.map(canvasController.restoreWorkspace) ?? false
+        DevelopmentReloadCoordinator.shared.start { [weak self] in
+            guard let self else { return }
+            self.canvasController.saveWorkspaceNow(windowFrame: self.window?.frame)
+            NSApp.terminate(nil)
+        }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.canvasController.bootstrapInitialTileIfNeeded()
+            if !didRestore {
+                self.canvasController.bootstrapInitialTileIfNeeded()
+            }
+            CanvasControlServer.shared.start(canvas: self.canvasController)
+            DispatchQueue.main.async {
+                DevelopmentReloadCoordinator.shared.publishReadinessIfRequested()
+            }
         }
     }
 
@@ -67,6 +90,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         } else {
             canvasController.duplicateFocusedTile()
         }
+    }
+
+    @objc func forkConversation(_ sender: Any?) {
+        canvasController.forkFocusedConversation()
     }
 
     @objc func newBrowser(_ sender: Any?) {
@@ -133,12 +160,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             return canvasController.canReloadFocusedBrowser()
         case #selector(openFocusedBrowserInDefaultBrowser(_:)):
             return canvasController.canOpenFocusedBrowserInDefaultBrowser()
+        case #selector(forkConversation(_:)):
+            return canvasController.hasFocusedTerminal()
         default:
             return true
         }
     }
 
-    private func buildWindow() {
+    func windowDidMove(_ notification: Notification) {
+        canvasController.scheduleWorkspaceSave()
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        canvasController.scheduleWorkspaceSave()
+    }
+
+    func windowWillEnterFullScreen(_ notification: Notification) {
+        canvasController.setFullscreenAppearance(true)
+    }
+
+    func windowDidExitFullScreen(_ notification: Notification) {
+        canvasController.setFullscreenAppearance(false)
+    }
+
+    func windowDidFailToEnterFullScreen(_ window: NSWindow) {
+        canvasController.setFullscreenAppearance(false)
+    }
+
+    private func buildWindow(restoring state: WorkspaceState?) {
         let initialContentSize = CanvasViewController.initialContentSize
         let window = CanvasWindow(
             contentRect: NSRect(origin: .zero, size: initialContentSize),
@@ -159,6 +208,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         window.center()
         window.isReleasedWhenClosed = false
         window.canvasCommandHandler = canvasController
+        window.delegate = self
+        if let frame = state?.windowFrame?.cgRect,
+           NSScreen.screens.contains(where: { $0.visibleFrame.intersects(frame) }) {
+            window.setFrame(frame, display: false)
+        }
         window.makeKeyAndOrderFront(nil)
         window.orderFrontRegardless()
         NSApp.activate(ignoringOtherApps: true)
@@ -204,6 +258,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let newTerminal = NSMenuItem(title: "New Terminal", action: #selector(self.newTerminal(_:)), keyEquivalent: "t")
         newTerminal.target = self
         canvasMenu.addItem(newTerminal)
+
+        let forkConversation = NSMenuItem(title: "Fork Conversation", action: #selector(self.forkConversation(_:)), keyEquivalent: "t")
+        forkConversation.keyEquivalentModifierMask = [.command, .shift]
+        forkConversation.target = self
+        canvasMenu.addItem(forkConversation)
 
         let newIndependentTerminal = NSMenuItem(title: "Duplicate Focused Tile", action: #selector(self.newIndependentTerminal(_:)), keyEquivalent: "d")
         newIndependentTerminal.target = self

@@ -58,20 +58,24 @@ final class BrowserTile: CanvasTile, WKNavigationDelegate, WKUIDelegate {
     private let webView: BrowserWebView
     private var observations: [NSKeyValueObservation] = []
     private var shouldFocusURLBarOnNextActivation: Bool
+    private var requestedURL: URL?
+
+    var onStateChanged: (() -> Void)?
 
     var canGoBack: Bool { webView.canGoBack }
     var canGoForward: Bool { webView.canGoForward }
     var canReload: Bool { webView.url != nil || webView.isLoading }
     var canOpenInDefaultBrowser: Bool { currentURL != nil }
-    var currentURL: URL? { webView.url }
+    var currentURL: URL? { webView.url ?? requestedURL }
 
-    init(index: Int, position: GridPoint, span: GridSize = .one, initialURL: URL? = nil) {
+    init(id: UUID = UUID(), index: Int, position: GridPoint, span: GridSize = .one, initialURL: URL? = nil) {
         self.webView = BrowserStore.shared.makeWebView()
         self.browserContentView = BrowserTileContentView(webView: webView)
         self.defaultTitle = "Browser \(index)"
         self.shouldFocusURLBarOnNextActivation = initialURL == nil
+        self.requestedURL = initialURL
 
-        super.init(index: index, position: position, span: span, title: defaultTitle, contentView: browserContentView)
+        super.init(id: id, index: index, position: position, span: span, title: defaultTitle, contentView: browserContentView)
 
         webView.browserTile = self
         webView.navigationDelegate = self
@@ -126,10 +130,12 @@ final class BrowserTile: CanvasTile, WKNavigationDelegate, WKUIDelegate {
     }
 
     func load(url: URL) {
+        requestedURL = url
         let request = URLRequest(url: url)
         browserContentView.setDisplayedURL(url.absoluteString)
         webView.load(request)
         refreshChrome()
+        onStateChanged?()
     }
 
     func goBack() {
@@ -207,7 +213,14 @@ final class BrowserTile: CanvasTile, WKNavigationDelegate, WKUIDelegate {
                 Task { @MainActor in self?.refreshChrome() }
             },
             webView.observe(\.url, options: [.new]) { [weak self] _, _ in
-                Task { @MainActor in self?.refreshChrome() }
+                Task { @MainActor in
+                    guard let self else { return }
+                    if let url = self.webView.url {
+                        self.requestedURL = url
+                    }
+                    self.refreshChrome()
+                    self.onStateChanged?()
+                }
             },
             webView.observe(\.canGoBack, options: [.new]) { [weak self] _, _ in
                 Task { @MainActor in self?.refreshChrome() }
